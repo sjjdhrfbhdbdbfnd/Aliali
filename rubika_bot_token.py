@@ -10,11 +10,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
 async def main() -> None:
     if not TOKEN:
-        raise SystemExit("RUBIKA_BOT_TOKEN را ست کنید.")
-
+        TOKEN = input("RUBIKA_BOT_TOKEN را وارد کنید: ").strip()
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not openai_api_key:
-        raise SystemExit("OPENAI_API_KEY را ست کنید.")
+        openai_api_key = input("OPENAI_API_KEY را وارد کنید: ").strip()
+    if not TOKEN or not openai_api_key:
+        raise SystemExit("توکن یا کلید OpenAI نامعتبر است.")
 
     bot = BotClient(TOKEN)
     ai = AsyncOpenAI(api_key=openai_api_key)
