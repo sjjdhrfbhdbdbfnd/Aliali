@@ -21,6 +21,8 @@ WELCOMED_MEMBERS_FILE = "welcomed_members.json"
 CONFIG_FILE = "config.json"
 GROUP_RULES_FILE = "group_rules.json"
 USER_STATS_FILE = "user_stats.json" # فایل جدید برای آمار کاربران
+ADS_FILE = "ads_data.json" # فایل جدید برای تبلیغات اجباری
+USER_AD_VIEWS_FILE = "user_ad_views.json" # فایل ردیابی مشاهده تبلیغات کاربران
 
 # === متغیرهای جهانی (از فایل کانفیگ بارگذاری می‌شوند) ===
 config = {}
@@ -30,6 +32,11 @@ OPENWEATHER_API_KEY = "" # برای کلید API آب و هوا
 
 # === زمان شروع ربات ===
 BOT_START_TIME = time.time() # ذخیره زمان شروع ربات
+
+# === متغیرهای سیستم تبلیغات اجباری ===
+ads_data = {} # ذخیره تبلیغات: {ad_id: {text, enabled, created_at, views}}
+user_ad_views = {} # ردیابی مشاهده تبلیغات: {user_guid: {ad_id: view_count}}
+user_message_counts = {} # شمارش پیام‌های کاربران: {user_guid: message_count}
 
 # === توابع کمکی برای بارگذاری و ذخیره داده‌ها ===
 def load_config():
@@ -77,6 +84,10 @@ def load_config():
                         settings['leave_message_text'] = "خداحافظ [نام کاربر]! امیدواریم باز هم شما را ببینیم."
                     if 'allowed_forward_sources' not in settings: # برای فوروارد خاص
                         settings['allowed_forward_sources'] = []
+                    if 'mandatory_ads_enabled' not in settings: # برای تبلیغات اجباری
+                        settings['mandatory_ads_enabled'] = False
+                    if 'ad_frequency' not in settings: # تعداد پیام بین هر تبلیغ
+                        settings['ad_frequency'] = 10
 
                 loaded_config['admin_ids'] = [guid for guid in loaded_config['admin_ids'] if isinstance(guid, str) and re.fullmatch(r"u[0-9a-fA-F]{32}", guid, re.IGNORECASE)]
 
@@ -177,11 +188,109 @@ def save_user_stats(data):
     with open(USER_STATS_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
+def load_ads_data():
+    """داده‌های تبلیغات اجباری را از فایل JSON بارگذاری می‌کند."""
+    try:
+        if os.path.exists(ADS_FILE):
+            with open(ADS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except json.JSONDecodeError:
+        print(f"خطا: فایل {ADS_FILE} فرمت JSON صحیح ندارد. یک فایل خالی ایجاد می‌شود.")
+        return {}
+
+def save_ads_data(data):
+    """داده‌های تبلیغات اجباری را در فایل JSON ذخیره می‌کند."""
+    with open(ADS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def load_user_ad_views():
+    """داده‌های مشاهده تبلیغات کاربران را بارگذاری می‌کند."""
+    try:
+        if os.path.exists(USER_AD_VIEWS_FILE):
+            with open(USER_AD_VIEWS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except json.JSONDecodeError:
+        print(f"خطا: فایل {USER_AD_VIEWS_FILE} فرمت JSON صحیح ندارد. یک فایل خالی ایجاد می‌شود.")
+        return {}
+
+def save_user_ad_views(data):
+    """داده‌های مشاهده تبلیغات کاربران را ذخیره می‌کند."""
+    with open(USER_AD_VIEWS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
 # === دیکشنری برای ذخیره آمار فعالیت کاربران ===
 user_activity_stats = load_user_stats()
 
 # === دیکشنری برای ردیابی اسپم ===
 spam_tracking = {} # {user_guid: {'last_message_time': timestamp, 'message_count_in_window': count}}
+
+# === بارگذاری داده‌های تبلیغات اجباری ===
+ads_data = load_ads_data()
+user_ad_views = load_user_ad_views()
+
+# === توابع سیستم تبلیغات اجباری ===
+def get_next_ad():
+    """تبلیغ بعدی فعال را برمی‌گرداند."""
+    active_ads = [ad_id for ad_id, ad_data in ads_data.items() if ad_data.get('enabled', True)]
+    if not active_ads:
+        return None
+    return random.choice(active_ads)
+
+def should_show_ad(user_guid, chat_id):
+    """تعیین می‌کند که آیا باید تبلیغ نمایش داده شود یا نه."""
+    if user_guid in ADMIN_IDS:
+        return False
+    
+    group_settings = config["group_settings"].get(chat_id, {})
+    if not group_settings.get("mandatory_ads_enabled", False):
+        return False
+    
+    ad_frequency = group_settings.get("ad_frequency", 10)
+    
+    # بررسی تعداد پیام‌های کاربر
+    if user_guid not in user_message_counts:
+        user_message_counts[user_guid] = 0
+    
+    user_message_counts[user_guid] += 1
+    
+    # نمایش تبلیغ هر N پیام
+    return user_message_counts[user_guid] % ad_frequency == 0
+
+async def show_mandatory_ad(user_guid, chat_id):
+    """نمایش تبلیغ اجباری به کاربر."""
+    ad_id = get_next_ad()
+    if not ad_id:
+        return False
+    
+    ad_info = ads_data[ad_id]
+    ad_text = ad_info['text']
+    
+    # ردیابی مشاهده تبلیغ
+    if user_guid not in user_ad_views:
+        user_ad_views[user_guid] = {}
+    if ad_id not in user_ad_views[user_guid]:
+        user_ad_views[user_guid][ad_id] = 0
+    
+    user_ad_views[user_guid][ad_id] += 1
+    ads_data[ad_id]['views'] = ads_data[ad_id].get('views', 0) + 1
+    
+    # ذخیره داده‌ها
+    save_ads_data(ads_data)
+    save_user_ad_views(user_ad_views)
+    
+    try:
+        # ارسال تبلیغ
+        await bot.send_message(
+            object_guid=chat_id,
+            text=f"📢 **تبلیغ** 📢\n\n{ad_text}\n\n⚡ این پیام تبلیغاتی است"
+        )
+        print(f"تبلیغ {ad_id} برای کاربر {user_guid} در چت {chat_id} نمایش داده شد.")
+        return True
+    except Exception as e:
+        print(f"خطا در نمایش تبلیغ: {e}")
+        return False
 
 # === توابع کمکی برای بازی سنگ کاغذ قیچی ===
 def play_rock_paper_scissors(user_choice):
@@ -789,7 +898,7 @@ scheduler_thread.start()
 @bot.on_message_updates()
 async def updates(message: Updates):
     # این خط برای رفع خطای "used prior to global declaration" بسیار مهم است.
-    global ADMIN_IDS, config, DEFAULT_CHANNEL_ID, OPENWEATHER_API_KEY, user_activity_stats, spam_tracking
+    global ADMIN_IDS, config, DEFAULT_CHANNEL_ID, OPENWEATHER_API_KEY, user_activity_stats, spam_tracking, ads_data, user_ad_views, user_message_counts
     print("")
     print("")
     print("                              📩📩📩📩")
@@ -986,6 +1095,19 @@ async def updates(message: Updates):
 * ضداسپم غیرفعال: (در گروه) غیرفعال‌سازی سیستم ضد اسپم.
 * امارش [شناسه کاربری/من]: (در گروه) نمایش آمار فعالیت کاربر در گروه.
 
+*دستورات مدیریت تبلیغات اجباری (فقط برای مدیران):*
+* /افزودن_تبلیغ [متن تبلیغ]: افزودن تبلیغ جدید به سیستم.
+* /لیست_تبلیغات: نمایش لیست تمام تبلیغات و وضعیت آن‌ها.
+* /حذف_تبلیغ [شناسه تبلیغ]: حذف یک تبلیغ از سیستم.
+* /فعال_تبلیغ [شناسه تبلیغ]: فعال کردن یک تبلیغ.
+* /غیرفعال_تبلیغ [شناسه تبلیغ]: غیرفعال کردن یک تبلیغ.
+* /فعال_تبلیغات_گروه: فعال کردن نمایش تبلیغات اجباری در گروه.
+* /غیرفعال_تبلیغات_گروه: غیرفعال کردن نمایش تبلیغات اجباری در گروه.
+* /تنظیم_فرکانس_تبلیغ [عدد]: تنظیم فرکانس نمایش تبلیغات (هر چند پیام یکبار).
+* /وضعیت_تبلیغات: نمایش آمار و وضعیت سیستم تبلیغات.
+* /مشاهده_تبلیغ [شناسه تبلیغ]: نمایش جزئیات کامل یک تبلیغ.
+* /پاکسازی_آمار_تبلیغات: پاک کردن تمام آمار مشاهده تبلیغات.
+
 *دستورات جدید (در گروه - برای فوروارد از کانال‌های خاص):*
 * /مجاز_کردن_فوروارد_از [آیدی چت]: افزودن یک کانال/گروه به لیست منابع مجاز فوروارد.
 * /ممنوع_کردن_فوروارد_از [آیدی چت]: حذف یک کانال/گروه از لیست منابع مجاز فوروارد.
@@ -1110,6 +1232,199 @@ async def updates(message: Updates):
         await message.reply("برای افزودن یک پیام سفارشی (سوال و جواب) جدید، می‌توانید از دستورات زیر استفاده کنید:\n\n1. **روش مستقیم (فقط مدیر):** `/افزودن_پاسخ سوال شما|پاسخ ربات1;پاسخ ربات2` (مثال: `/افزودن_پاسخ هوا چطوره؟|آفتابیه;ابریه`)\n\n2. **روش مکالمه‌ای (فقط مدیر):** ابتدا **یادگیر فعال** را ارسال کنید، سپس هر پیام به فرمت 'سوال|جواب1;جواب2' را بفرستید. برای پایان، **یادگیر غیرفعال** را ارسال کنید.")
         return
 
+    # --- دستورات مدیریت تبلیغات اجباری (فقط برای ادمین) ---
+    elif lower_text.startswith('/افزودن_تبلیغ '):
+        if user_guid in ADMIN_IDS:
+            ad_text = message.text[len('/افزودن_تبلیغ '):].strip()
+            if ad_text:
+                ad_id = f"ad_{int(time.time())}_{random.randint(1000, 9999)}"
+                ads_data[ad_id] = {
+                    'text': ad_text,
+                    'enabled': True,
+                    'created_at': datetime.datetime.now().isoformat(),
+                    'views': 0,
+                    'creator': user_guid
+                }
+                save_ads_data(ads_data)
+                await message.reply(f"✅ تبلیغ جدید با شناسه `{ad_id}` اضافه شد.")
+                print(f"تبلیغ جدید {ad_id} توسط ادمین {user_guid} اضافه شد.")
+            else:
+                await message.reply("❌ لطفاً متن تبلیغ را وارد کنید.\nمثال: `/افزودن_تبلیغ متن تبلیغ شما`")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغ اضافه کنند.")
+        return
+
+    elif lower_text == "/لیست_تبلیغات":
+        if user_guid in ADMIN_IDS:
+            if ads_data:
+                response_lines = ["📢 **لیست تبلیغات:**\n"]
+                for ad_id, ad_info in ads_data.items():
+                    status = "✅ فعال" if ad_info.get('enabled', True) else "❌ غیرفعال"
+                    views = ad_info.get('views', 0)
+                    preview = ad_info['text'][:50] + "..." if len(ad_info['text']) > 50 else ad_info['text']
+                    response_lines.append(f"🆔 `{ad_id}`")
+                    response_lines.append(f"📊 وضعیت: {status}")
+                    response_lines.append(f"👁️ مشاهده: {views} بار")
+                    response_lines.append(f"📝 متن: {preview}")
+                    response_lines.append("─────────────")
+                
+                response_text = "\n".join(response_lines)
+                if len(response_text) > 4000:
+                    response_text = response_text[:3900] + "\n... و موارد دیگر."
+                await message.reply(response_text)
+            else:
+                await message.reply("❌ هیچ تبلیغی ثبت نشده است.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند لیست تبلیغات را مشاهده کنند.")
+        return
+
+    elif lower_text.startswith('/حذف_تبلیغ '):
+        if user_guid in ADMIN_IDS:
+            ad_id = lower_text[len('/حذف_تبلیغ '):].strip()
+            if ad_id in ads_data:
+                del ads_data[ad_id]
+                save_ads_data(ads_data)
+                await message.reply(f"✅ تبلیغ `{ad_id}` حذف شد.")
+                print(f"تبلیغ {ad_id} توسط ادمین {user_guid} حذف شد.")
+            else:
+                await message.reply(f"❌ تبلیغ با شناسه `{ad_id}` یافت نشد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغ حذف کنند.")
+        return
+
+    elif lower_text.startswith('/فعال_تبلیغ '):
+        if user_guid in ADMIN_IDS:
+            ad_id = lower_text[len('/فعال_تبلیغ '):].strip()
+            if ad_id in ads_data:
+                ads_data[ad_id]['enabled'] = True
+                save_ads_data(ads_data)
+                await message.reply(f"✅ تبلیغ `{ad_id}` فعال شد.")
+            else:
+                await message.reply(f"❌ تبلیغ با شناسه `{ad_id}` یافت نشد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغ را فعال کنند.")
+        return
+
+    elif lower_text.startswith('/غیرفعال_تبلیغ '):
+        if user_guid in ADMIN_IDS:
+            ad_id = lower_text[len('/غیرفعال_تبلیغ '):].strip()
+            if ad_id in ads_data:
+                ads_data[ad_id]['enabled'] = False
+                save_ads_data(ads_data)
+                await message.reply(f"✅ تبلیغ `{ad_id}` غیرفعال شد.")
+            else:
+                await message.reply(f"❌ تبلیغ با شناسه `{ad_id}` یافت نشد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغ را غیرفعال کنند.")
+        return
+
+    elif lower_text.startswith('/فعال_تبلیغات_گروه'):
+        if user_guid in ADMIN_IDS and chat_id.startswith('g'):
+            if chat_id not in config["group_settings"]:
+                config["group_settings"][chat_id] = {}
+            config["group_settings"][chat_id]["mandatory_ads_enabled"] = True
+            save_config(config)
+            await message.reply("✅ تبلیغات اجباری در این گروه فعال شد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغات گروه را فعال کنند.")
+        return
+
+    elif lower_text.startswith('/غیرفعال_تبلیغات_گروه'):
+        if user_guid in ADMIN_IDS and chat_id.startswith('g'):
+            if chat_id not in config["group_settings"]:
+                config["group_settings"][chat_id] = {}
+            config["group_settings"][chat_id]["mandatory_ads_enabled"] = False
+            save_config(config)
+            await message.reply("✅ تبلیغات اجباری در این گروه غیرفعال شد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند تبلیغات گروه را غیرفعال کنند.")
+        return
+
+    elif lower_text.startswith('/تنظیم_فرکانس_تبلیغ '):
+        if user_guid in ADMIN_IDS and chat_id.startswith('g'):
+            try:
+                frequency = int(lower_text[len('/تنظیم_فرکانس_تبلیغ '):].strip())
+                if frequency < 1:
+                    await message.reply("❌ فرکانس باید عددی بزرگتر از 0 باشد.")
+                    return
+                
+                if chat_id not in config["group_settings"]:
+                    config["group_settings"][chat_id] = {}
+                config["group_settings"][chat_id]["ad_frequency"] = frequency
+                save_config(config)
+                await message.reply(f"✅ فرکانس نمایش تبلیغات به هر {frequency} پیام تنظیم شد.")
+            except ValueError:
+                await message.reply("❌ لطفاً یک عدد صحیح وارد کنید.\nمثال: `/تنظیم_فرکانس_تبلیغ 10`")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند فرکانس تبلیغات را تنظیم کنند.")
+        return
+
+    elif lower_text == "/وضعیت_تبلیغات":
+        if user_guid in ADMIN_IDS:
+            total_ads = len(ads_data)
+            active_ads = len([ad for ad in ads_data.values() if ad.get('enabled', True)])
+            total_views = sum(ad.get('views', 0) for ad in ads_data.values())
+            
+            if chat_id.startswith('g'):
+                group_settings = config["group_settings"].get(chat_id, {})
+                ads_enabled = group_settings.get("mandatory_ads_enabled", False)
+                frequency = group_settings.get("ad_frequency", 10)
+                status_text = f"📊 **وضعیت تبلیغات:**\n\n"
+                status_text += f"📢 تعداد کل تبلیغات: {total_ads}\n"
+                status_text += f"✅ تبلیغات فعال: {active_ads}\n"
+                status_text += f"👁️ کل مشاهدات: {total_views}\n"
+                status_text += f"🔄 وضعیت در این گروه: {'فعال' if ads_enabled else 'غیرفعال'}\n"
+                status_text += f"⚡ فرکانس نمایش: هر {frequency} پیام"
+            else:
+                status_text = f"📊 **وضعیت کلی تبلیغات:**\n\n"
+                status_text += f"📢 تعداد کل تبلیغات: {total_ads}\n"
+                status_text += f"✅ تبلیغات فعال: {active_ads}\n"
+                status_text += f"👁️ کل مشاهدات: {total_views}"
+            
+            await message.reply(status_text)
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند وضعیت تبلیغات را مشاهده کنند.")
+        return
+
+    elif lower_text.startswith('/مشاهده_تبلیغ '):
+        if user_guid in ADMIN_IDS:
+            ad_id = lower_text[len('/مشاهده_تبلیغ '):].strip()
+            if ad_id in ads_data:
+                ad_info = ads_data[ad_id]
+                created_date = ad_info.get('created_at', 'نامشخص')
+                creator = ad_info.get('creator', 'نامشخص')
+                views = ad_info.get('views', 0)
+                status = "✅ فعال" if ad_info.get('enabled', True) else "❌ غیرفعال"
+                
+                detail_text = f"📋 **جزئیات تبلیغ `{ad_id}`:**\n\n"
+                detail_text += f"📊 وضعیت: {status}\n"
+                detail_text += f"👁️ تعداد مشاهده: {views} بار\n"
+                detail_text += f"👤 سازنده: `{creator}`\n"
+                detail_text += f"📅 تاریخ ایجاد: {created_date}\n\n"
+                detail_text += f"📝 **متن تبلیغ:**\n{ad_info['text']}"
+                
+                await message.reply(detail_text)
+            else:
+                await message.reply(f"❌ تبلیغ با شناسه `{ad_id}` یافت نشد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند جزئیات تبلیغ را مشاهده کنند.")
+        return
+
+    elif lower_text == "/پاکسازی_آمار_تبلیغات":
+        if user_guid in ADMIN_IDS:
+            user_ad_views.clear()
+            user_message_counts.clear()
+            # ریست کردن آمار مشاهده در خود تبلیغات
+            for ad_id in ads_data:
+                ads_data[ad_id]['views'] = 0
+            
+            save_user_ad_views(user_ad_views)
+            save_ads_data(ads_data)
+            await message.reply("✅ تمام آمار مشاهده تبلیغات و شمارنده پیام‌های کاربران پاک شد.")
+            print(f"آمار تبلیغات توسط ادمین {user_guid} پاک شد.")
+        else:
+            await message.reply("⛔️ فقط مدیران می‌توانند آمار تبلیغات را پاک کنند.")
+        return
 
     # --- قابلیت نمایش زمان و تاریخ و ارز ---
     if lower_text == "/ساعت" or lower_text == "ساعت":
@@ -1948,7 +2263,17 @@ https://rubika.ir/QUCHAN2"""
                 await message.reply(random.choice(response))
             else:
                 await message.reply(response)
+            
+            # --- نمایش تبلیغ اجباری بعد از پاسخ ---
+            if should_show_ad(user_guid, chat_id):
+                await asyncio.sleep(1) # تاخیر کوتاه بین پاسخ و تبلیغ
+                await show_mandatory_ad(user_guid, chat_id)
             return
+
+    # --- نمایش تبلیغ اجباری برای پیام‌های عادی ---
+    # این بخش برای پیام‌هایی که پاسخ خاصی ندارند اجرا می‌شود
+    if should_show_ad(user_guid, chat_id):
+        await show_mandatory_ad(user_guid, chat_id)
 
 # === شروع ربات ===
 bot.run()
